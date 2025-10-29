@@ -11,7 +11,9 @@ pour ajouter événements, familles, etc.
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from datetime import date
+from pathlib import Path
+from typing import Any, Iterable, Optional
 import unicodedata
 
 from geneweb.domain.models import Famille, Individu, Sexe, Source
@@ -254,4 +256,245 @@ def serialize_gedcom_minimal(
     # Joindre avec des fins de lignes Unix
     return "\n".join(out_lines) + "\n"
 
+
+# ============================================================================
+# Parsing GEDCOM (Issue #21)
+# ============================================================================
+
+
+def _parse_gedcom_line(line: str) -> tuple[int, str, str] | None:
+    """Parse une ligne GEDCOM et retourne (level, tag, value) ou None si invalide.
+
+    Format: "LEVEL TAG VALUE" ou "LEVEL @REF@ TYPE"
+    """
+    line = line.rstrip()
+    if not line:
+        return None
+
+    parts = line.split(None, 2)
+    if len(parts) < 2:
+        return None
+
+    try:
+        level = int(parts[0])
+        tag = parts[1]
+        value = parts[2] if len(parts) > 2 else ""
+        return (level, tag, value)
+    except ValueError:
+        return None
+
+
+def _parse_name_field(value: str) -> tuple[str | None, str | None]:
+    """Parse un champ NAME GEDCOM "Given/Surname/" vers (prenom, nom).
+
+    Exemple: "Jean/DUPONT/" -> ("Jean", "DUPONT")
+    """
+    if not value:
+        return (None, None)
+
+    # Format: "Given/Surname/" ou "/Surname/" ou "Given/"
+    parts = value.split("/")
+    prenom = parts[0].strip() if parts[0] else None
+    nom = parts[1].strip() if len(parts) > 1 and parts[1] else None
+    return (prenom, nom)
+
+
+def _parse_date(value: str) -> date | None:
+    """Parse une date GEDCOM (format ISO YYYY-MM-DD ou approximations).
+
+    Support minimal: YYYY-MM-DD uniquement pour l'instant.
+    """
+    if not value:
+        return None
+    try:
+        # Format ISO simple YYYY-MM-DD
+        return date.fromisoformat(value)
+    except ValueError:
+        # Ignorer les dates malformées pour l'instant
+        return None
+
+
+def _parse_sex(value: str) -> Sexe | None:
+    """Parse un champ SEX GEDCOM (M/F/U) vers Sexe enum."""
+    value_upper = value.upper().strip()
+    if value_upper == "M":
+        return Sexe.M
+    if value_upper == "F":
+        return Sexe.F
+    if value_upper in ("U", "X"):
+        return Sexe.X
+    return None
+
+
+def parse_gedcom_minimal(gedcom_text: str) -> tuple[list[Individu], list[Famille]]:
+    """Parse un GEDCOM minimal et retourne liste d'individus et familles (Issue #21).
+
+    Support minimal:
+    - INDI avec NAME, SEX, BIRT (DATE/PLAC), DEAT (DATE/PLAC)
+    - FAM avec HUSB, WIFE, CHIL
+
+    Args:
+        gedcom_text: Contenu GEDCOM en texte
+
+    Returns:
+        Tuple (liste_individus, liste_familles)
+    """
+    lines = gedcom_text.splitlines()
+    individus: list[Individu] = []
+    familles: list[Famille] = []
+
+    # Mapping GEDCOM ref (@Ix@) -> ID Python
+    gedcom_ref_to_python_id: dict[str, str] = {}
+    python_id_counter = 1
+
+    # État du parsing
+    current_indi: dict[str, Any] | None = None
+    current_fam: dict[str, Any] | None = None
+    current_level = -1
+    current_tag = ""
+    in_birt = False
+    in_deat = False
+
+    for line in lines:
+        parsed = _parse_gedcom_line(line)
+        if not parsed:
+            continue
+
+        level, tag, value = parsed
+
+        # Nouveau record (level 0)
+        if level == 0:
+            # Finir le record précédent si nécessaire
+            if current_indi:
+                # Créer l'individu
+                indi_id = current_indi.get("id", f"I{python_id_counter}")
+                python_id_counter += 1
+                individu = Individu(
+                    id=indi_id,
+                    nom=current_indi.get("nom"),
+                    prenom=current_indi.get("prenom"),
+                    sexe=current_indi.get("sexe"),
+                    date_naissance=current_indi.get("date_naissance"),
+                    lieu_naissance=current_indi.get("lieu_naissance"),
+                    date_deces=current_indi.get("date_deces"),
+                    lieu_deces=current_indi.get("lieu_deces"),
+                )
+                individus.append(individu)
+                if "gedcom_ref" in current_indi:
+                    gedcom_ref_to_python_id[current_indi["gedcom_ref"]] = indi_id
+                current_indi = None
+
+            if current_fam:
+                # Créer la famille
+                fam_id = current_fam.get("id", f"F{python_id_counter}")
+                python_id_counter += 1
+                famille = Famille(
+                    id=fam_id,
+                    pere_id=current_fam.get("pere_id"),
+                    mere_id=current_fam.get("mere_id"),
+                    enfants_ids=current_fam.get("enfants_ids", []),
+                )
+                familles.append(famille)
+                current_fam = None
+
+            # Début nouveau record
+            # Format GEDCOM: "0 @REF@ TYPE" où tag="@REF@" et value="TYPE"
+            if tag.startswith("@") and value == "INDI":
+                # 0 @I1@ INDI
+                current_indi = {"gedcom_ref": tag, "id": tag}
+                current_fam = None
+                in_birt = False
+                in_deat = False
+            elif tag.startswith("@") and value == "FAM":
+                # 0 @F1@ FAM
+                current_fam = {"gedcom_ref": tag, "id": tag}
+                current_indi = None
+
+            current_level = 0
+            continue
+
+        # Dans un bloc INDI
+        if current_indi and level == 1:
+            if tag == "NAME":
+                prenom, nom = _parse_name_field(value)
+                current_indi["prenom"] = prenom
+                current_indi["nom"] = nom
+            elif tag == "SEX":
+                current_indi["sexe"] = _parse_sex(value)
+            elif tag == "BIRT":
+                in_birt = True
+                in_deat = False
+            elif tag == "DEAT":
+                in_deat = True
+                in_birt = False
+            current_tag = tag
+
+        # Sous-tags niveau 2 dans INDI
+        if current_indi and level == 2:
+            if current_tag == "BIRT" or in_birt:
+                if tag == "DATE":
+                    current_indi["date_naissance"] = _parse_date(value)
+                elif tag == "PLAC":
+                    current_indi["lieu_naissance"] = value.strip()
+            elif current_tag == "DEAT" or in_deat:
+                if tag == "DATE":
+                    current_indi["date_deces"] = _parse_date(value)
+                elif tag == "PLAC":
+                    current_indi["lieu_deces"] = value.strip()
+
+        # Dans un bloc FAM
+        if current_fam and level == 1:
+            if tag == "HUSB":
+                # Convertir référence GEDCOM vers ID Python
+                husb_id = gedcom_ref_to_python_id.get(value.strip(), value.strip("@"))
+                current_fam["pere_id"] = husb_id
+            elif tag == "WIFE":
+                wife_id = gedcom_ref_to_python_id.get(value.strip(), value.strip("@"))
+                current_fam["mere_id"] = wife_id
+            elif tag == "CHIL":
+                child_id = gedcom_ref_to_python_id.get(value.strip(), value.strip("@"))
+                if "enfants_ids" not in current_fam:
+                    current_fam["enfants_ids"] = []
+                current_fam["enfants_ids"].append(child_id)
+
+    # Finaliser les derniers records
+    if current_indi:
+        indi_id = current_indi.get("id", f"I{python_id_counter}")
+        individu = Individu(
+            id=indi_id,
+            nom=current_indi.get("nom"),
+            prenom=current_indi.get("prenom"),
+            sexe=current_indi.get("sexe"),
+            date_naissance=current_indi.get("date_naissance"),
+            lieu_naissance=current_indi.get("lieu_naissance"),
+            date_deces=current_indi.get("date_deces"),
+            lieu_deces=current_indi.get("lieu_deces"),
+        )
+        individus.append(individu)
+
+    if current_fam:
+        fam_id = current_fam.get("id", f"F{python_id_counter}")
+        famille = Famille(
+            id=fam_id,
+            pere_id=current_fam.get("pere_id"),
+            mere_id=current_fam.get("mere_id"),
+            enfants_ids=current_fam.get("enfants_ids", []),
+        )
+        familles.append(famille)
+
+    return (individus, familles)
+
+
+def load_gedcom(file_path: str | Path) -> tuple[list[Individu], list[Famille]]:
+    """Charge un fichier GEDCOM et retourne individus et familles (Issue #21).
+
+    Args:
+        file_path: Chemin vers le fichier GEDCOM
+
+    Returns:
+        Tuple (liste_individus, liste_familles)
+    """
+    path = Path(file_path)
+    content = path.read_text(encoding="utf-8", errors="ignore")
+    return parse_gedcom_minimal(content)
 

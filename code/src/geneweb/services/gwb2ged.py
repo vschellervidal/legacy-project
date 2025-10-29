@@ -30,11 +30,11 @@ def gwb2ged_python(input_dir: str | Path, output_file: str | Path) -> str:
     if not root_path.exists():
         raise FileNotFoundError(f"Répertoire GWB introuvable: {input_dir}")
 
-    # Charger les individus depuis GWB
-    individus = load_gwb_minimal(root_path)
+    # Charger les individus, familles et sources depuis GWB (Issues #24, #25)
+    individus, familles, sources = load_gwb_minimal(root_path)
 
     # Sérialiser en GEDCOM
-    gedcom_content = serialize_gedcom_minimal(individus)
+    gedcom_content = serialize_gedcom_minimal(individus, familles, sources)
 
     # Écrire le fichier de sortie
     out_path = Path(output_file)

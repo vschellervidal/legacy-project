@@ -15,9 +15,11 @@ def test_load_gwb_minimal_ok(tmp_path: Path) -> None:
     ]
     (tmp_path / "index.json").write_text(json.dumps(data), encoding="utf-8")
 
-    individus = load_gwb_minimal(tmp_path)
+    individus, familles, sources = load_gwb_minimal(tmp_path)
 
     assert len(individus) == 3
+    assert len(familles) == 0
+    assert len(sources) == 0
     assert individus[0].id == "I001" and individus[0].nom == "DUPONT" and individus[0].prenom == "Jean"
     assert individus[0].sexe == Sexe.M
     assert individus[1].sexe == Sexe.F
@@ -42,8 +44,10 @@ def test_load_gwb_minimal_invalid_entries(tmp_path: Path) -> None:
     ]
     (tmp_path / "index.json").write_text(json.dumps(data), encoding="utf-8")
 
-    individus = load_gwb_minimal(tmp_path)
+    individus, familles, sources = load_gwb_minimal(tmp_path)
     assert len(individus) == 1
+    assert len(familles) == 0
+    assert len(sources) == 0
     assert individus[0].id == "I001" and individus[0].sexe is None
 
 

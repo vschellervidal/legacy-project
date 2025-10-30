@@ -97,3 +97,55 @@ def run_gwd(args: Sequence[str]) -> str:
     raise FileNotFoundError(
         f"gwd introuvable. Compilez avec dune dans {root} ou définissez {GENEWEB_OCAML_ROOT_ENV} vers un dépôt compilé."
     )
+
+
+def run_consang(args: Sequence[str]) -> str:
+	"""Exécute consang OCaml (Issue #29).
+	
+	Args:
+		args: Arguments pour consang (ex: ["-fast", "/path/to/base.gwb"])
+	
+	Returns:
+		Sortie stdout de consang
+	
+	Raises:
+		OcamlCommandError: Si la commande échoue
+		FileNotFoundError: Si consang n'est pas trouvé
+	"""
+	root = _default_root()
+	exe = _bin_path(root, "consang/consang.exe")
+
+	if exe.exists():
+		return _run([str(exe), *args], cwd=root)
+	dune = shutil.which("dune")
+	if dune:
+		return _run([dune, "exec", str(root / "bin/consang/consang.exe"), "--", *args], cwd=root)
+	raise FileNotFoundError(
+		f"consang introuvable. Compilez avec dune dans {root} ou définissez {GENEWEB_OCAML_ROOT_ENV} vers un dépôt compilé."
+	)
+
+
+def run_connex(args: Sequence[str]) -> str:
+	"""Exécute connex OCaml (Issue #29).
+	
+	Args:
+		args: Arguments pour connex (ex: ["-a", "/path/to/base.gwb"])
+	
+	Returns:
+		Sortie stdout de connex
+	
+	Raises:
+		OcamlCommandError: Si la commande échoue
+		FileNotFoundError: Si connex n'est pas trouvé
+	"""
+	root = _default_root()
+	exe = _bin_path(root, "connex/connex.exe")
+
+	if exe.exists():
+		return _run([str(exe), *args], cwd=root)
+	dune = shutil.which("dune")
+	if dune:
+		return _run([dune, "exec", str(root / "bin/connex/connex.exe"), "--", *args], cwd=root)
+	raise FileNotFoundError(
+		f"connex introuvable. Compilez avec dune dans {root} ou définissez {GENEWEB_OCAML_ROOT_ENV} vers un dépôt compilé."
+	)

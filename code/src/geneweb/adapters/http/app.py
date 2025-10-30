@@ -5,7 +5,8 @@ import tempfile
 from contextlib import suppress
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import RedirectResponse
 
 from geneweb.adapters.ocaml_bridge.bridge import (
     OcamlCommandError,
@@ -33,6 +34,17 @@ from geneweb.services.gwd_modify import (
     mod_famille,
     del_individu,
     del_famille,
+)
+from geneweb.services.gwd_wiznotes import (
+    list_wiznotes,
+    get_wiznote,
+    set_wiznote,
+    del_wiznote,
+)
+from geneweb.services.gwd_images import (
+    list_carrousel_images,
+    get_image_file,
+    set_blason_image,
 )
 
 app = FastAPI(title="GeneWeb Python API", version="0.1.0")
@@ -455,6 +467,250 @@ def gwd_del_fam(
 		raise HTTPException(status_code=404, detail=str(e)) from e
 	except Exception as e:
 		raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# ============================================================================
+# Issue #36 - Notes wizard (lecture/recherche/édition)
+# ============================================================================
+
+
+@app.get("/gwd/wiznotes")
+def gwd_wiznotes_list(
+	base: str = Query(..., description="Chemin répertoire GWB"),
+	q: str | None = Query(None, description="Filtre plein texte"),
+	use_python: bool = Query(False),
+) -> dict:
+	try:
+		resolved = _resolve_input_dir(base)
+		res = list_wiznotes(resolved, query=q)
+		return {"status": "ok", "implementation": "python", **res}
+	except FileNotFoundError as e:
+		raise HTTPException(status_code=404, detail=str(e)) from e
+	except Exception as e:
+		raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/gwd/wiznotes/item")
+def gwd_wiznotes_get(
+	base: str = Query(...),
+	key: str = Query(..., description="Clé de note (ex: IND:I001, FAM:F001, SRC:S001)"),
+) -> dict:
+	try:
+		resolved = _resolve_input_dir(base)
+		res = get_wiznote(resolved, key)
+		return {"status": "ok", "implementation": "python", **res}
+	except ValueError as e:
+		raise HTTPException(status_code=404, detail=str(e)) from e
+	except Exception as e:
+		raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.put("/gwd/wiznotes/item")
+def gwd_wiznotes_set(
+	base: str = Query(...),
+	key: str = Query(...),
+	note: str = Query(...),
+) -> dict:
+	try:
+		resolved = _resolve_input_dir(base)
+		res = set_wiznote(resolved, key, note)
+		return {"status": "ok", "implementation": "python", **res}
+	except Exception as e:
+		raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.delete("/gwd/wiznotes/item")
+def gwd_wiznotes_del(
+	base: str = Query(...),
+	key: str = Query(...),
+) -> dict:
+	try:
+		resolved = _resolve_input_dir(base)
+		del_wiznote(resolved, key)
+		return {"status": "ok", "implementation": "python"}
+	except ValueError as e:
+		raise HTTPException(status_code=404, detail=str(e)) from e
+	except Exception as e:
+		raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# ============================================================================
+# Issue #36 - Images avancées (carrousel/blason)
+# ============================================================================
+
+
+@app.get("/gwd/images/carrousel")
+def gwd_images_carrousel(
+	base: str = Query(...),
+	i: str | None = Query(None, description="ID individu pour filtrage heuristique"),
+) -> dict:
+	try:
+		resolved = _resolve_input_dir(base)
+		res = list_carrousel_images(resolved, person_id=i)
+		return {"status": "ok", "implementation": "python", **res}
+	except FileNotFoundError as e:
+		raise HTTPException(status_code=404, detail=str(e)) from e
+	except Exception as e:
+		raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/gwd/images/file")
+def gwd_images_file(
+	base: str = Query(...),
+	path: str = Query(..., description="Chemin relatif depuis le dossier images"),
+):
+	try:
+		resolved = _resolve_input_dir(base)
+		content, mime = get_image_file(resolved, path)
+		return Response(content=content, media_type=mime)
+	except FileNotFoundError as e:
+		raise HTTPException(status_code=404, detail=str(e)) from e
+	except ValueError as e:
+		raise HTTPException(status_code=400, detail=str(e)) from e
+	except Exception as e:
+		raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.put("/gwd/images/blason")
+def gwd_images_set_blason(
+	base: str = Query(...),
+	i: str = Query(..., description="ID individu"),
+	image: str = Query(..., description="Nom de l'image blason"),
+) -> dict:
+	try:
+		resolved = _resolve_input_dir(base)
+		res = set_blason_image(resolved, i, image)
+		return {"status": "ok", "implementation": "python", **res}
+	except Exception as e:
+		raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# ============================================================================
+# Issue #36 - Utilitaires: REQUEST, CHK_DATA, HIST*
+# ============================================================================
+
+
+@app.get("/gwd/util/request")
+def gwd_util_request(req: Request) -> dict:
+    return {
+        "status": "ok",
+        "implementation": "python",
+        "method": req.method,
+        "url": str(req.url),
+        "headers": {k.decode() if isinstance(k, bytes) else k: v for k, v in req.headers.raw},
+    }
+
+
+@app.get("/gwd/util/chk_data")
+def gwd_util_chk_data(base: str = Query(...)) -> dict:
+    from geneweb.io.gwb import load_gwb_minimal
+
+    resolved = _resolve_input_dir(base)
+    individus, familles, _ = load_gwb_minimal(resolved)
+
+    errors: list[str] = []
+    ind_ids = {i.id for i in individus}
+    for f in familles:
+        if f.pere_id and f.pere_id not in ind_ids:
+            errors.append(f"FAMILLE {f.id}: père inconnu {f.pere_id}")
+        if f.mere_id and f.mere_id not in ind_ids:
+            errors.append(f"FAMILLE {f.id}: mère inconnue {f.mere_id}")
+        for e in f.enfants_ids:
+            if e not in ind_ids:
+                errors.append(f"FAMILLE {f.id}: enfant inconnu {e}")
+
+    return {"status": "ok", "implementation": "python", "errors": errors, "ok": len(errors) == 0}
+
+
+@app.get("/gwd/util/hist")
+def gwd_util_hist() -> dict:
+    # Place-holder minimal
+    return {"status": "ok", "implementation": "python", "events": []}
+
+
+# ============================================================================
+# Issue #37 - Proxy compatibilité et redirections URL historiques
+# ============================================================================
+
+
+def _compat_build_gwd_url(
+    base: str,
+    mode: str,
+    i: str | None = None,
+    f: str | None = None,
+    v: str | None = None,
+    use_python: bool = False,
+) -> str:
+    from urllib.parse import urlencode
+
+    params: dict[str, str] = {"base": base}
+    if use_python:
+        params["use_python"] = "true"
+    if mode:
+        params["mode"] = mode
+    if i:
+        params["i"] = i
+    if f:
+        params["f"] = f
+    if v:
+        params["v"] = v
+    return f"/gwd?{urlencode(params)}"
+
+
+@app.get("/compat/gw")
+@app.get("/gw.cgi")
+def compat_gw(
+    b: str | None = Query(None, description="Nom/chemin base (legacy param)"),
+    base: str | None = Query(None, description="Nom/chemin base (nouveau param)"),
+    m: str | None = Query(None, description="Mode legacy (F, S, NG, A, D, NOTES, …)"),
+    i: str | None = Query(None, description="ID individu (iper)"),
+    f: str | None = Query(None, description="ID famille (ifam)"),
+    v: str | None = Query(None, description="Valeur générique (ex: recherche)"),
+    use_python: bool = Query(False, description="Forcer Python"),
+):
+    # Choix du paramètre base
+    raw_base = base or b or ""
+    if not raw_base:
+        raise HTTPException(status_code=400, detail="Paramètre base/b manquant")
+
+    # Résoudre le chemin (assure cohérence avec /gwd)
+    resolved_base = _resolve_input_dir(raw_base)
+
+    # Mapping legacy -> /gwd
+    mode = ""
+    target_i = None
+    target_f = None
+    target_v = None
+
+    if not m or m == "PERSO":
+        # Accueil/fiche individu
+        mode = ""
+        target_i = i
+    elif m == "F":
+        mode = "F"
+        target_f = f or i  # certains liens passaient l'id famille via i
+    elif m == "S":
+        mode = "S"
+    elif m == "NG":
+        mode = "NG"
+        target_v = v
+    elif m == "A":
+        mode = "A"
+        target_i = i
+    elif m == "D":
+        mode = "D"
+        target_i = i
+    elif m == "NOTES":
+        mode = "NOTES"
+    else:
+        # Par défaut, route générique
+        mode = m or ""
+
+    url = _compat_build_gwd_url(
+        str(resolved_base), mode, i=target_i, f=target_f, v=target_v, use_python=use_python
+    )
+    # 301 pour réécriture durable des anciens liens
+    return RedirectResponse(url=url, status_code=301)
 
 
 # ============================================================================
